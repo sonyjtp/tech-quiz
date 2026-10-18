@@ -67,3 +67,16 @@ export const AttemptRequest = z.object({
   verdict: z.enum(["correct", "partial", "incorrect", "revealed"]),
   evaluation: z.enum(["manual", "ai"]),
 });
+
+export const LoginRequest = z.object({
+  username: z.string().max(100),
+  password: z.string().max(200),
+});
+
+export const SignupRequest = LoginRequest.extend({ code: z.string().max(200).optional() });
+
+export const TopicQuestionsRequest = z.object({
+  userId: z.coerce.number().int().positive(),
+  subject: z.string().regex(/^[\w-]+$/),
+  topic: z.string().regex(/^[\w-]+$/),
+});

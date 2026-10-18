@@ -1,8 +1,10 @@
 import Link from "next/link";
 import { listSubjects } from "@/lib/content";
 import { aiEnabled } from "@/lib/claude";
+import { requireUser } from "@/lib/auth";
 
-export default function Home() {
+export default async function Home() {
+  await requireUser();
   const subjects = listSubjects();
   return (
     <>

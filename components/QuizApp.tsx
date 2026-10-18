@@ -15,6 +15,7 @@ import {
   shuffleOptions,
 } from "@/lib/scoring";
 import { MODELS, MODEL_IDS, estimateCost } from "@/lib/models";
+import { ApiError, errorText, post, postJson } from "@/lib/client-api";
 import {
   DIFFICULTIES,
   POINTS,
@@ -32,6 +33,39 @@ import {
   type TokenUsage,
   type Topic,
 } from "@/lib/types";
+
+/**
+ * Read a streamed follow-up reply: reply text, then optionally \u0001 + usage JSON;
+ * \u0000 + message if the server failed mid-stream. Calls `onText` as text arrives and
+ * throws `ApiError` if the stream reports an error or the reply is empty.
+ */
+async function readFollowUp(res: Response, onText: (text: string) => void): Promise<{ reply: string; usage?: TokenUsage }> {
+  if (!res.body) throw new ApiError("The server sent an empty response.", res.status);
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let raw = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    raw += decoder.decode(value, { stream: true });
+    const err = raw.indexOf("\u0000");
+    if (err >= 0) throw new ApiError(raw.slice(err + 1));
+    onText(raw.split("\u0001")[0]);
+  }
+  const [reply, usageJson] = raw.split("\u0001");
+  if (!reply.trim()) throw new ApiError("Claude returned an empty reply.");
+  return { reply, usage: parseUsage(usageJson) };
+}
+
+/** Usage JSON sent after a streamed reply; missing or malformed usage is ignored. */
+function parseUsage(json: string | undefined): TokenUsage | undefined {
+  if (!json) return undefined;
+  try {
+    return JSON.parse(json) as TokenUsage;
+  } catch {
+    return undefined;
+  }
+}
 
 type UsageKind = "generation" | "grading" | "follow-up";
 interface UsageEntry {
@@ -178,34 +212,32 @@ export function QuizApp({
     }
 
     setPhase("loading");
-    try {
-      const res = await fetch("/api/generate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: settings.model,
-          subjectSlug: subject.slug,
-          subjectName: subject.name,
-          topics: topics
-            .filter((t) => settings.topics.includes(t.slug))
-            .map(({ slug, name, focus, notes }) => ({ slug, name, focus, notes })),
-          count: settings.count,
-          difficulty: settings.difficulty,
-          types: settings.types,
-          avoid: filePool.map((q) => q.prompt.split("\n")[0]).slice(0, 200),
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? `Request failed (${res.status})`);
-      if (!data.questions.length) throw new Error("Claude returned no usable questions. Try again.");
-      begin(
-        shuffle(data.questions as Question[]).map(shuffleOptions),
-        data.usage ? [{ kind: "generation", usage: data.usage as TokenUsage }] : [],
-      );
-    } catch (e) {
+    const failed = (reason: string) => {
       setPhase("setup");
-      setError(`Couldn't generate questions: ${e instanceof Error ? e.message : e}`);
+      setError(`Couldn't generate questions: ${reason}`);
+    };
+    let data: { questions: Question[]; usage?: TokenUsage };
+    try {
+      data = await postJson("/api/generate", {
+        model: settings.model,
+        subjectSlug: subject.slug,
+        subjectName: subject.name,
+        topics: topics
+          .filter((t) => settings.topics.includes(t.slug))
+          .map(({ slug, name, focus, notes }) => ({ slug, name, focus, notes })),
+        count: settings.count,
+        difficulty: settings.difficulty,
+        types: settings.types,
+        avoid: filePool.map((q) => q.prompt.split("\n")[0]).slice(0, 200),
+      });
+    } catch (e) {
+      return failed(errorText(e));
     }
+    if (!data.questions?.length) return failed("Claude returned no usable questions. Try again.");
+    begin(
+      shuffle(data.questions).map(shuffleOptions),
+      data.usage ? [{ kind: "generation", usage: data.usage }] : [],
+    );
   }
 
   async function gradeOne(q: Question): Promise<GradeResult> {
@@ -214,19 +246,13 @@ export function QuizApp({
     if (byKey) return byKey;
     if (run.evaluation === "manual" || !aiEnabled) return awaitingSelfGrade();
     try {
-      const res = await fetch("/api/grade", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model: run.model, question: q, answer: a }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? `Request failed (${res.status})`);
-      return data.result as GradeResult;
+      const data = await postJson<{ result: GradeResult }>("/api/grade", { model: run.model, question: q, answer: a });
+      return data.result;
     } catch (e) {
       return {
         score: 0,
         verdict: "incorrect",
-        feedback: `Grading failed: ${e instanceof Error ? e.message : e}`,
+        feedback: `Grading failed: ${errorText(e)}`,
         mistakes: [],
         improvements: [],
         gradedBy: "ai",
@@ -263,17 +289,11 @@ export function QuizApp({
 
   async function loadStats(ids: string[]) {
     try {
-      const res = await fetch("/api/stats", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ids }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? `Request failed (${res.status})`);
+      const data = await postJson<{ stats: Record<string, QuestionStats> }>("/api/stats", { ids });
       setStats(data.stats);
       setHistoryError(null);
     } catch (e) {
-      setHistoryError(e instanceof Error ? e.message : String(e));
+      setHistoryError(errorText(e));
     }
   }
 
@@ -281,22 +301,16 @@ export function QuizApp({
   async function saveAttempt(q: Question, r: GradeResult) {
     if (r.verdict === "pending") return;
     try {
-      const res = await fetch("/api/attempts", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          question: { id: q.id, subject: q.subject, topic: q.topic, source: q.source, difficulty: q.difficulty, prompt: q.prompt },
-          score: r.score,
-          verdict: r.verdict,
-          evaluation: run.evaluation,
-        }),
+      const data = await postJson<{ stats: QuestionStats }>("/api/attempts", {
+        question: { id: q.id, subject: q.subject, topic: q.topic, source: q.source, difficulty: q.difficulty, prompt: q.prompt },
+        score: r.score,
+        verdict: r.verdict,
+        evaluation: run.evaluation,
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? `Request failed (${res.status})`);
       setStats((cur) => ({ ...cur, [q.id]: data.stats }));
       setHistoryError(null);
     } catch (e) {
-      setHistoryError(`Not saved to history: ${e instanceof Error ? e.message : e}`);
+      setHistoryError(`Not saved to history: ${errorText(e)}`);
     }
   }
   const setAnswerFor = (q: Question, a: Answer) => setAnswers((cur) => ({ ...cur, [q.id]: a }));
@@ -311,44 +325,19 @@ export function QuizApp({
     update({ role: "assistant", content: "" });
     setAsking((s) => new Set(s).add(q.id));
     try {
-      const res = await fetch("/api/followup", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: run.model,
-          topicName: topicName[q.topic] ?? q.topic,
-          question: q,
-          answer: answers[q.id] ?? null,
-          result: results[q.id],
-          messages: [...history, userMsg].map(({ role, content }) => ({ role, content })),
-        }),
+      const res = await post("/api/followup", {
+        model: run.model,
+        topicName: topicName[q.topic] ?? q.topic,
+        question: q,
+        answer: answers[q.id] ?? null,
+        result: results[q.id],
+        messages: [...history, userMsg].map(({ role, content }) => ({ role, content })),
       });
-      if (!res.ok || !res.body) {
-        const data = await res.json().catch(() => ({}));
-        throw new Error(data.error ?? `Request failed (${res.status})`);
-      }
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      // Stream format: reply text, then optionally \u0001 + usage JSON; \u0000 + message on error.
-      let raw = "";
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        raw += decoder.decode(value, { stream: true });
-        const err = raw.indexOf("\u0000");
-        if (err >= 0) throw new Error(raw.slice(err + 1));
-        update({ role: "assistant", content: raw.split("\u0001")[0] });
-      }
-      const [reply, usageJson] = raw.split("\u0001");
-      if (!reply.trim()) throw new Error("Claude returned an empty reply.");
-      let usage: TokenUsage | undefined;
-      try {
-        usage = usageJson ? (JSON.parse(usageJson) as TokenUsage) : undefined;
-      } catch {}
+      const { reply, usage } = await readFollowUp(res, (text) => update({ role: "assistant", content: text }));
       update({ role: "assistant", content: reply, usage });
       logUsage("follow-up", usage);
     } catch (e) {
-      update({ role: "assistant", content: e instanceof Error ? e.message : String(e), error: true });
+      update({ role: "assistant", content: errorText(e), error: true });
     } finally {
       setAsking((s) => {
         const n = new Set(s);

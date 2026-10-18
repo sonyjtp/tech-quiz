@@ -1,15 +1,14 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { listSubjects, loadSubject } from "@/lib/content";
+import { loadSubject } from "@/lib/content";
+import { requireUser } from "@/lib/auth";
 import { aiEnabled, defaultModel } from "@/lib/claude";
 import { QuizApp } from "@/components/QuizApp";
 
-export function generateStaticParams() {
-  return listSubjects().map((s) => ({ subject: s.slug }));
-}
-
 export default async function SubjectPage({ params }: { params: Promise<{ subject: string }> }) {
-  const subject = loadSubject((await params).subject);
+  const slug = (await params).subject;
+  await requireUser(`/${slug}`);
+  const subject = loadSubject(slug);
   if (!subject) notFound();
   return (
     <>

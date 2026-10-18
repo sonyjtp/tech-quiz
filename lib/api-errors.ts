@@ -15,3 +15,5 @@ export function errorResponse(err: unknown) {
     err instanceof Anthropic.RateLimitError ? 429 : err instanceof Anthropic.APIError ? 502 : 500;
   return NextResponse.json({ error: errorMessage(err) }, { status });
 }
+
+export const DB_DOWN = "Can't reach the database. Is it running? (npm run db:up)";

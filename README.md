@@ -5,14 +5,16 @@ Quiz yourself on what you're learning. Pick a subject and one or more topics, th
 - **Grading:** grade written answers yourself, or have Claude grade them against the answer key. Claude points out mistakes and how to improve.
 - **Follow-ups:** ask Claude follow-up questions about any graded answer.
 - **Retries:** try any question again.
+- **Accounts:** everyone logs in with a username and password, so history and scores are kept per person.
 - **History:** every attempt is saved to a database, and each question shows how often you've got it right.
+- **Scoreboard:** correct and wrong answers, % completed and last attempt per person and topic, with every question's attempts one click away.
 
 Scores are weighted by difficulty, and every Claude call shows its token usage.
 
 ## Requirements
 
 - Node.js 20.9 or later
-- Docker, for the question-history database
+- Docker, for the database (accounts, history and the scoreboard)
 - An Anthropic API key. Optional: without one, manual evaluation with your markdown files still works.
 
 ## Setup
@@ -24,12 +26,15 @@ npm run db:up                # starts PostgreSQL in Docker on port 5499
 npm run dev                  # http://localhost:4747
 ```
 
+Open http://localhost:4747, choose **Create account**, and pick a username and password.
+
 ### Environment variables (`.env.local`)
 
 | Variable | Required | Purpose |
 |---|---|---|
 | `ANTHROPIC_API_KEY` | For AI features | Enables AI-generated questions, AI evaluation and follow-up questions |
-| `DATABASE_URL` | For history | `postgres://quiz:quiz@localhost:5499/study_quiz`, the database from `docker-compose.yml` |
+| `DATABASE_URL` | Yes | `postgres://quiz:quiz@localhost:5499/study_quiz`, the database from `docker-compose.yml`. Logins, history and the scoreboard all live there |
+| `SIGNUP_CODE` | No | If set, creating an account requires this code. Set it before sharing the app with anyone |
 | `CLAUDE_MODEL` | No | Default selection in the model picker (default `claude-opus-5-5`) |
 
 `.env.local` is git-ignored, so never commit it.
@@ -45,10 +50,11 @@ Both were chosen so they don't clash with the other projects in `~/IdeaProjects`
 
 ## Using the app
 
-1. **Home:** pick a subject.
-2. **Setup:** choose the options below and click **Start quiz**.
-3. **Quiz:** answer each question. Under its tags, each question shows your history with it.
-4. **Results:**
+1. **Log in** (or create an account). Your name, **Scoreboard** and **Log out** are in the header.
+2. **Home:** pick a subject.
+3. **Setup:** choose the options below and click **Start quiz**.
+4. **Quiz:** answer each question. Under its tags, each question shows your history with it.
+5. **Results:**
    - your total score, with breakdowns by difficulty and by topic;
    - token usage;
    - a review of every question, where you can try questions again or ask follow-ups.
@@ -58,7 +64,7 @@ Both were chosen so they don't clash with the other projects in `~/IdeaProjects`
 | Option | Choices |
 |---|---|
 | Topics | Any combination of the subject's topics (All / None shortcuts) |
-| Questions come from | **My markdown files**: questions and answer keys from `content/`. **AI-generated**: Claude writes new questions, each with its own answer key. |
+| Questions come from | **My markdown files**: questions and answer keys from your files in `content/` (you add these; see [Adding your own questions](#adding-your-own-questions)). **AI-generated**: Claude writes new questions, each with its own answer key. |
 | Evaluation | **Manual**: you compare written answers with the answer key and grade yourself. **AI**: Claude grades written answers against the answer key. |
 | Claude model | Opus 5.5 (default), Sonnet 5.5, Haiku 5.5 or Fable 5.1, used for generating, grading and follow-ups. Disabled when nothing in the quiz uses AI. |
 | Number of questions | 5, 10, 15, 20, or any number from 1 to 30 |
@@ -135,6 +141,36 @@ Claude receives:
 
 Its output must follow a JSON schema, so every question comes with an answer key, explanation and, for written answers, a rubric. A typical 10-question generation takes 20–60 seconds depending on the model.
 
+## Accounts and login
+
+Every page and API route needs a login. Without one, pages redirect to `/login` and API routes return `401`.
+
+- **Create account:** a username (3–32 letters, numbers, dots, dashes or underscores) and a password of at least 8 characters. Usernames ignore case, so `Sony` and `sony` are the same account; the name is shown as you typed it. If `SIGNUP_CODE` is set, the form also asks for it.
+- **Passwords** are stored as salted `scrypt` hashes (Node's built-in `crypto`), never in plain text.
+- **Sessions** last 30 days. The browser gets a random token in an `httpOnly`, `SameSite=Lax` cookie (`sq_session`, also `Secure` in production); the database stores only its SHA-256 hash. **Log out** deletes the session.
+- `proxy.ts` (Next.js 16's name for middleware) turns away requests without the cookie. Every page and route then checks the session against the database (`currentUser()` in `lib/auth.ts`).
+- There's no password reset yet. To remove an account and its history: `npm run db:psql`, then `DELETE FROM users WHERE username = 'name';`.
+
+**Attempts from before login.** Attempts saved before accounts existed belonged to nobody. The first time the new version connects to the database, it creates three accounts named `testuser-<adjective>-<animal>` (e.g. `testuser-amber-falcon`) and gives each old attempt to one of them at random. These accounts have no password, so nobody can log in as them, and new usernames can't start with `testuser-`. This runs once, inside a transaction.
+
+## Scoreboard
+
+**Scoreboard** in the header shows one row per person and topic:
+
+| Column | Meaning |
+|---|---|
+| Name | Who answered (the account's display name) |
+| Topic | The topic, with its subject underneath when all subjects are shown |
+| Correct | Attempts graded fully correct. "+N partly" underneath counts partly correct ones |
+| Wrong | Attempts graded incorrect, plus **Show answer** |
+| % completed | Saved questions in the topic's file answered at least once, e.g. "50% · 7 of 14" |
+| Last attempted | When that person last answered a question in the topic |
+
+- Click any column header to sort, and click again to reverse.
+- Only topics with at least one attempt are listed. Filter by **Name** and **Subject**.
+- Click a row to list **every question in the topic**, with how many times that person attempted it and how many times they got it right, plus difficulty and type.
+- Correct, Wrong and Last attempted include AI-generated questions in the topic. % completed and the question list only cover the questions in your markdown files. Attempts on AI-generated questions, or on questions you've since edited, are noted under the list.
+
 ## Question history (database)
 
 Every graded attempt is saved to **PostgreSQL 18.6** running in Docker:
@@ -142,7 +178,7 @@ Every graded attempt is saved to **PostgreSQL 18.6** running in Docker:
 - container: `study-quiz-db`
 - port: `5499`, reachable only from your machine
 
-Under its tags, each question shows:
+History is per person: you only see your own attempts. Under its tags, each question shows:
 - **New** if you've never answered it;
 - otherwise your **correct rate**, how many times you've answered it, how many of those were correct or partly correct, and your last result and when it was. For example: **20%** "Answered 5 times · 1 correct · last correct, 2 days ago".
 
@@ -164,12 +200,16 @@ Skipped, unanswered questions aren't recorded.
 
 | Table | Contents |
 |---|---|
+| `users` | One row per account: id, username (lowercase), display name, password hash (empty for `testuser-` accounts), created |
+| `sessions` | One row per login: SHA-256 of the session token, user id, created, expires |
 | `questions` | One row per question ever attempted: id, subject, topic, source (`file`/`ai`), difficulty, question text, first seen |
-| `attempts` | One row per graded attempt: question id, score, verdict, evaluation mode (`manual`/`ai`), timestamp |
+| `attempts` | One row per graded attempt: question id, user id, score, verdict, evaluation mode (`manual`/`ai`), timestamp |
+
+Schema changes (like the `user_id` column added with login) are applied automatically and safely when the app starts, even if two server processes start at once.
 
 **Question IDs** are a hash of the subject, topic and question text. History stays with a question when you add, remove or reorder questions in a file. Editing a question's text makes it a new question with fresh history. AI-generated questions are stored too, though they rarely come up again.
 
-If the database isn't running, quizzes still work. Questions show "History unavailable" and attempts aren't saved.
+If the database isn't running, nobody can log in; the login page and the scoreboard say so. If it goes down during a quiz, the quiz keeps working, but questions show "History unavailable" and attempts aren't saved.
 
 ## Token usage
 
@@ -198,21 +238,43 @@ Output tokens include Claude's thinking. Costs are estimates from the list price
 
 The list and prices live in `lib/models.ts`, and the API rejects models that aren't on it. Generation and follow-ups run at `medium` effort, grading at `low` (set in `lib/claude.ts`). On Opus 5.5, Sonnet 5.5 and Fable 5.1, a request Claude declines is automatically retried on a fallback model.
 
-## Adding subjects, topics and questions
+## Adding your own questions
 
-A folder is a subject and a markdown file is a topic: `content/<subject>/<topic>.md`.
+> **Note: question files aren't part of the repository.** The `content/` folder is git-ignored, so a fresh clone has no subjects.
+> - **If you use "Questions come from: My markdown files",** add your own question files to `content/` in the format below before starting a quiz. The app only asks questions that are in these files, and it grades against the answers you write in them.
+> - **If you only use "AI-generated",** you still need a topic file per topic, because the topic list comes from these files. A file with just the frontmatter is enough, and its `focus:` list and notes steer Claude's questions.
+
+### Where files go
+
+A folder is a subject and a markdown file is a topic:
+
+```
+content/
+  kotlin/
+    generics.md
+    coroutines.md
+  kafka/
+    producers.md
+    consumers.md
+```
+
+New or edited files show up when you reload the page, in `npm run dev` and in production (pages are rendered per request because they check your login).
+
+### File format
+
+Each file starts with YAML frontmatter, followed by questions. Each question begins with a `## Q:` heading. Here's one of each question type:
 
 ````markdown
 ---
-subject: Kotlin
-topic: Coroutines
-order: 3
-focus:
+subject: Kotlin          # subject display name (use the same value in every file of the folder)
+topic: Coroutines        # topic display name
+order: 3                 # optional: sorts topics on the setup page
+focus:                   # optional: steers AI-generated questions for this topic
   - structured concurrency and scopes
   - dispatchers
 ---
 
-Optional notes here are given to Claude as context when it generates questions.
+Optional notes before the first question. Claude uses them as context when generating questions.
 
 ## Q: Which builder returns a `Deferred<T>`?
 difficulty: easy
@@ -221,6 +283,14 @@ difficulty: easy
 - [ ] runBlocking
 explanation: `async` returns `Deferred<T>`; `launch` returns `Job`.
 
+## Q: Which of these are coroutine dispatchers?
+type: multi
+difficulty: medium
+- [x] Dispatchers.IO
+- [x] Dispatchers.Default
+- [ ] Dispatchers.Network
+explanation: The built-in dispatchers are Default, IO, Main and Unconfined.
+
 ## Q: What does this print?
 type: short
 difficulty: medium
@@ -228,36 +298,39 @@ difficulty: medium
 println(listOf(1, 2, 3).map { it * 2 }.sum())
 ```
 answer: 12
+explanation: Doubling gives 2, 4, 6, which sum to 12.
 
 ## Q: Explain the difference between `launch` and `async`.
 type: freetext
-difficulty: medium
+difficulty: hard
 answer: |
-Both start a coroutine. `launch` is fire-and-forget and returns a `Job`...
-rubric: Mentions Job vs Deferred, await(), and exception propagation differences.
+Both start a coroutine. `launch` is fire-and-forget and returns a `Job`;
+`async` returns a `Deferred<T>` whose result you get with `await()`...
+rubric: Mentions Job vs Deferred, await(), and how exceptions propagate.
+explanation: Use `launch` for side effects and `async` when you need a result.
 ````
 
-**Frontmatter:**
-- `subject`: display name for the subject.
-- `topic`: display name for the topic.
-- `order`: optional, sorts topics.
-- `focus`: optional list that steers AI generation.
+### Fields
 
-**Question fields:**
-- **Every saved question needs its answer:** `[x]` on the correct options, or an `answer:` line. Questions without one are skipped, with a warning in the server log.
-- `type` is optional: options with one `[x]` make an `mcq`, more than one make a `multi`, and no options make a `freetext`.
-- `difficulty` defaults to `medium`.
-- `accept: a | b` lists alternative exact answers for `short` questions.
-- `explanation:` is shown after answering.
-- `rubric:` lists the key points for grading written answers, used by both Claude and manual grading.
-- `field: |` starts a multi-line value that runs until the next field.
+| Field | Required | Meaning |
+|---|---|---|
+| `## Q: <text>` | Yes | Starts a question. The heading text plus any lines below it (including fenced code) form the question. |
+| `- [ ]` / `- [x]` | For `mcq` and `multi` | Answer options; `[x]` marks the correct ones. |
+| `answer:` | For `short` and `freetext` | The answer key. For `short`, the exact expected answer; for `freetext`, a model answer. |
+| `type:` | No | `mcq`, `multi`, `short` or `freetext`. If omitted: one `[x]` makes `mcq`, several make `multi`, and no options makes `freetext`. |
+| `difficulty:` | No | `easy` (1 pt), `medium` (2 pts, the default) or `hard` (3 pts). |
+| `accept:` | No | Other exact answers for `short` questions, separated by `\|`, e.g. `accept: inline \| inline fun`. |
+| `explanation:` | Recommended | Shown after the question is graded. |
+| `rubric:` | Recommended for `freetext` | Key points a full-credit answer must contain. Claude grades against it, and manual grading shows it as a checklist. |
 
-**Other rules:**
-- Code fences in the question body are kept as part of the question.
-- A topic file with only frontmatter (no questions) works for AI-generated quizzes.
-- YAML list items that begin with a backtick must be quoted or reworded.
+### Rules
 
-Included: **Kotlin › Generics** (20 questions) and **Kotlin › Null Safety** (4 questions).
+- **Every question must include its answer:** `[x]` on the correct options, or an `answer:` line. Questions without an answer are skipped, with a warning in the server log, because grading always compares against your key.
+- Field lines go *after* the question text and code. Field names must start at the beginning of a line, outside code fences.
+- `answer: |` (or `explanation: |`, `rubric: |`) starts a multi-line value. It runs until the next field line or option, and can contain code fences.
+- `short` answers are compared ignoring case, extra spaces, quotes, backticks and a trailing period. Anything else goes to Claude (AI evaluation) or to you (manual evaluation).
+- YAML list items that start with a backtick (`` ` ``) break the frontmatter, so reword them or wrap them in quotes.
+- Editing a question's text gives it a new ID, so its history in the database starts over. Reordering or adding questions doesn't.
 
 ## npm scripts
 
@@ -274,30 +347,44 @@ Included: **Kotlin › Generics** (20 questions) and **Kotlin › Null Safety** 
 
 | Path | Purpose |
 |---|---|
-| `content/` | Your subjects (folders) and topics (markdown files) |
+| `content/` | Your subjects (folders) and topics (markdown files); git-ignored |
+| `proxy.ts` | Sends requests without a session cookie to `/login` (pages) or answers `401` (API) |
+| `app/layout.tsx` | Header with your name, Scoreboard and Log out |
 | `app/page.tsx` | Home page: subject list |
+| `app/login/page.tsx` | Log in / create account |
 | `app/[subject]/page.tsx` | Subject page (renders the quiz) |
+| `app/scoreboard/page.tsx` | Scoreboard |
 | `components/QuizApp.tsx` | Setup, quiz, results, follow-ups, history and token usage UI |
+| `components/AuthForm.tsx` | Login and sign-up form |
+| `components/Scoreboard.tsx` | Scoreboard table, filters, sorting and per-question drill-down |
 | `components/Md.tsx` | Markdown rendering for questions and answers |
 | `lib/content.ts` | Reads and parses `content/` |
 | `lib/question-id.ts` | Stable question IDs (content hash) |
 | `lib/scoring.ts` | Answer-key grading, self-grading, shuffling, points |
 | `lib/claude.ts` | Claude calls: generation, grading, follow-up streaming, token usage |
 | `lib/models.ts` | Model list, prices, cost estimates |
-| `lib/db.ts` | PostgreSQL pool, schema, attempts and stats queries |
+| `lib/auth.ts` | Password hashing, sessions and cookies, `currentUser()` / `requireUser()` |
+| `lib/db.ts` | PostgreSQL pool, schema and migrations, users, sessions, attempts, stats and scoreboard queries |
+| `lib/scoreboard.ts` | Combines database totals with the question files for the scoreboard |
 | `lib/api-schemas.ts` | Request validation (zod) for all API routes |
 | `app/api/generate` | Generate questions |
 | `app/api/grade` | AI-grade an answer |
 | `app/api/followup` | Stream a follow-up reply |
 | `app/api/stats` | Load history for a set of questions |
 | `app/api/attempts` | Record an attempt and return updated history |
+| `app/api/auth/login`, `signup`, `logout` | Accounts and sessions |
+| `app/api/scoreboard/topic` | Every question in a topic with one person's attempts |
+| `docs/sequence-diagram.md` | Sequence diagrams of login, a quiz, and the scoreboard |
 | `docker-compose.yml` | PostgreSQL 18.6 with a persistent volume |
 
 Built with Next.js 16, React 19, TypeScript 7, the Anthropic TypeScript SDK, zod 4, node-postgres and gray-matter, all at their latest versions.
 
 ## Troubleshooting
 
-- **"History unavailable":** the database isn't running. Start it with `npm run db:up`.
+- **No subjects on the home page:** `content/` is empty (it isn't in the repository). Add question files as described in [Adding your own questions](#adding-your-own-questions).
+- **"History unavailable"** or **"Can't reach the database"** on the login page: the database isn't running. Start it with `npm run db:up`.
+- **Sent back to the login page:** your session expired (after 30 days) or you logged out in another tab. Log in again.
+- **"Wrong username or password":** usernames ignore case, passwords don't. There's no reset yet; see [Accounts and login](#accounts-and-login).
 - **AI options are greyed out:** `ANTHROPIC_API_KEY` is missing from `.env.local`. Add it and restart `npm run dev`.
 - **A request fails with a 500 right after editing code:** the dev server was still recompiling. Send it again.
 - **"Grading failed":** use **Retry grading** on that question in the results review.
@@ -305,6 +392,7 @@ Built with Next.js 16, React 19, TypeScript 7, the Anthropic TypeScript SDK, zod
 ## Before deploying
 
 - Set `ANTHROPIC_API_KEY` and `DATABASE_URL` as environment variables on the host. Use a managed PostgreSQL database in production; the tables are created automatically.
-- **Protect the API routes.** Once deployed, anyone who finds the URL can call `/api/generate`, `/api/grade` and `/api/followup` on your key, and write to your history through `/api/attempts`. Add authentication or an access code before sharing the URL.
-- Content is read at build time, so redeploy after editing markdown files.
+- **Set `SIGNUP_CODE`.** Every page and API route requires a login, but without a sign-up code anyone who finds the URL can create an account and use your Anthropic key.
+- Serve it over **HTTPS**. In production the session cookie is marked `Secure`, so logins don't work over plain HTTP.
+- Content is read on each request, so edited markdown files show up without a redeploy (if the files are on the server).
 - Set a monthly spend limit on the key in the Anthropic Console.
