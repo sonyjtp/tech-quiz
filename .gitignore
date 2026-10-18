@@ -7,3 +7,7 @@ next-env.d.ts
 *.tsbuildinfo
 .DS_Store
 .idea
+
+# Question banks are personal study material and aren't committed.
+# See "Adding your own questions" in README.md for the format.
+content/
